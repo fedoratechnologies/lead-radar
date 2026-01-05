@@ -1,0 +1,64 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: lead-radar-collector
+  namespace: lead-radar
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  schedule: "15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: collector
+              image: python:3.12-slim
+              imagePullPolicy: IfNotPresent
+              command: ["bash", "-lc"]
+              args:
+                - |
+                  set -euo pipefail
+                  pip install --no-cache-dir "https://github.com/fedoratechnologies/lead-radar/archive/18352c2.tar.gz"
+                  export LEAD_RADAR_DB_DSN="postgresql://${DB_USERNAME}:${DB_PASSWORD}@lead-radar-cnpg-rw.lead-radar.svc.cluster.local:5432/lead_radar?sslmode=require"
+                  export LEAD_RADAR_CONFIG_DIR="/config"
+                  export LEAD_RADAR_ERPNEXT_BASE_URL="http://erpnext.erpnext.svc.cluster.local:8080"
+                  lead-radar-collector
+              env:
+                - name: DB_USERNAME
+                  valueFrom:
+                    secretKeyRef:
+                      name: lead-radar-cnpg-app
+                      key: username
+                - name: DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: lead-radar-cnpg-app
+                      key: password
+                - name: LEAD_RADAR_ERPNEXT_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: lead-radar-erpnext-api
+                      key: api_key
+                      optional: true
+                - name: LEAD_RADAR_ERPNEXT_API_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: lead-radar-erpnext-api
+                      key: api_secret
+                      optional: true
+                - name: LEAD_RADAR_USER_AGENT
+                  value: "lead-radar/0.1 (+https://github.com/fedoratechnologies/lead-radar)"
+              volumeMounts:
+                - name: config
+                  mountPath: /config
+                  readOnly: true
+          volumes:
+            - name: config
+              configMap:
+                name: lead-radar-config

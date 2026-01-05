@@ -1,0 +1,22 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: lead-radar-cnpg
+  namespace: lead-radar
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  instances: 1
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.4
+  bootstrap:
+    initdb:
+      database: lead_radar
+      owner: lead_radar
+      secret:
+        name: lead-radar-cnpg-app
+  enableSuperuserAccess: false
+  superuserSecret:
+    name: lead-radar-cnpg-app
+  storage:
+    storageClass: synology-nfs
+    size: 20Gi
