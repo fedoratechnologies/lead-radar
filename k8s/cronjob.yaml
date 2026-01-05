@@ -16,15 +16,28 @@ spec:
       template:
         spec:
           restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
           containers:
             - name: collector
               image: python:3.12-slim
               imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
               command: ["bash", "-lc"]
               args:
                 - |
                   set -euo pipefail
-                  pip install --no-cache-dir "https://github.com/fedoratechnologies/lead-radar/archive/18352c2.tar.gz"
+                  export HOME=/tmp
+                  export PYTHONUSERBASE=/tmp/pythonuserbase
+                  export PATH="$PYTHONUSERBASE/bin:$PATH"
+                  pip install --no-cache-dir --user "https://github.com/fedoratechnologies/lead-radar/archive/18352c2.tar.gz"
                   export LEAD_RADAR_DB_DSN="postgresql://${DB_USERNAME}:${DB_PASSWORD}@lead-radar-cnpg-rw.lead-radar.svc.cluster.local:5432/lead_radar?sslmode=require"
                   export LEAD_RADAR_CONFIG_DIR="/config"
                   export LEAD_RADAR_ERPNEXT_BASE_URL="http://erpnext.erpnext.svc.cluster.local:8080"
