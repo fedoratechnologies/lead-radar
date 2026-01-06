@@ -12,6 +12,7 @@ from .db import (
     compute_org_aggregate,
     connect,
     ensure_schema,
+    get_recent_signals,
     get_last_signal_at,
     update_org_score,
     upsert_org,
@@ -159,9 +160,23 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
             # MVP: create Lead if none exists for this name.
             existing = erpnext.find_lead_by_name(org_name)
             if not existing:
+                recent = get_recent_signals(conn, org_name=org_name, limit=3)
+                lines = [
+                    "Auto-created by Lead Radar.",
+                    f"Aggregate score: {aggregate:.2f}",
+                    "",
+                    "Recent signals:",
+                ]
+                for r in recent:
+                    ts = (r.get("published_at") or r.get("fetched_at"))
+                    ts_str = ts.isoformat() if ts else ""
+                    title = str(r.get("title") or "").strip()
+                    url = str(r.get("url") or "").strip()
+                    score = float(r.get("signal_score") or 0.0)
+                    lines.append(f"- {ts_str} score={score:.1f} {title} ({url})")
                 erpnext.create_lead(
                     lead_name=org_name,
-                    notes=f"Auto-created by Lead Radar. Score={aggregate:.2f}",
+                    notes="\n".join(lines).strip(),
                 )
 
 

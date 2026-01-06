@@ -222,3 +222,22 @@ def get_last_signal_at(conn: psycopg.Connection, org_name: str) -> datetime | No
         return ts.replace(tzinfo=timezone.utc)
     return ts
 
+
+def get_recent_signals(
+    conn: psycopg.Connection,
+    org_name: str,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT title, url, summary, published_at, fetched_at, signal_score, keyword_hits, org_confidence
+            FROM signals
+            WHERE org_name = %(org_name)s
+            ORDER BY COALESCE(published_at, fetched_at) DESC
+            LIMIT %(limit)s
+            """,
+            {"org_name": org_name, "limit": int(limit)},
+        )
+        rows = cur.fetchall() or []
+    return [dict(r) for r in rows]
