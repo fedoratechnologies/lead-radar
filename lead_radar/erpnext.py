@@ -73,7 +73,7 @@ class ERPNextClient:
     def create_lead(self, lead_name: str, notes: str | None = None, status: str = "Lead") -> str:
         payload: dict[str, Any] = {"lead_name": lead_name, "status": status}
         if notes:
-            payload["notes"] = notes
+            payload["notes"] = [{"note": notes}]
         resp = self.post("/api/resource/Lead", json=payload)
         resp.raise_for_status()
         return str(resp.json()["data"]["name"])
