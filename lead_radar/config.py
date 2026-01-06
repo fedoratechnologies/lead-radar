@@ -14,6 +14,7 @@ class ScoringConfig:
     half_life_days: int
     min_signal_confidence: float
     promote_threshold: float
+    score_scale: float = 16.0
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,7 @@ def load_config(config_dir: Path) -> LeadRadarConfig:
         half_life_days=int(scoring_raw["half_life_days"]),
         min_signal_confidence=float(scoring_raw["min_signal_confidence"]),
         promote_threshold=float(scoring_raw["promote_threshold"]),
+        score_scale=float(scoring_raw.get("score_scale") or 16.0),
     )
 
     sources: list[Source] = []

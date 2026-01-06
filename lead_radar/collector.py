@@ -27,6 +27,7 @@ from .keyword_match import match_keywords
 from .org_extract import extract_org_candidate
 from .raw_store import RawStore, json_safe, raw_store_from_env
 from .rss import fetch_rss
+from .scoring import score_to_percent
 from .web import fetch_html_list, fetch_sitemap
 
 
@@ -65,6 +66,7 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
 
     enabled_packs = [p for p in config.keyword_packs if p.enabled]
     erpnext = _erpnext_client_from_env()
+    erpnext_company = _env("LEAD_RADAR_ERPNEXT_COMPANY") or "Fedora Technologies"
     raw_store = _raw_store_init()
 
     inserted_signals = 0
@@ -158,7 +160,7 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
         )
 
     for org_name in list_org_names(conn):
-        aggregate = compute_org_aggregate(
+        aggregate_raw = compute_org_aggregate(
             conn,
             org_name=org_name,
             now=now,
@@ -166,6 +168,7 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
             half_life_days=config.scoring.half_life_days,
             min_signal_confidence=config.scoring.min_signal_confidence,
         )
+        aggregate = score_to_percent(aggregate_raw, scale=float(config.scoring.score_scale or 16.0))
         last_signal_at = get_last_signal_at(conn, org_name=org_name)
         promoted_at = now if aggregate >= config.scoring.promote_threshold else None
         update_org_score(
@@ -176,18 +179,17 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
             promoted_at=promoted_at,
         )
 
-        if (
-            erpnext
-            and promoted_at
-            and aggregate >= config.scoring.promote_threshold
-        ):
-            # MVP: create Lead if none exists for this name.
+        if not erpnext or not last_signal_at:
+            continue
+
+        if aggregate >= config.scoring.promote_threshold:
+            # High confidence: create Lead (if missing) and close any open Opportunity for this Prospect.
             existing = erpnext.find_lead_by_name(org_name)
             if not existing:
                 recent = get_recent_signals(conn, org_name=org_name, limit=3)
                 lines = [
                     "Auto-created by Lead Radar.",
-                    f"Aggregate score: {aggregate:.2f}",
+                    f"Aggregate score: {aggregate:.2f} (raw={aggregate_raw:.2f})",
                     "",
                     "Recent signals:",
                 ]
@@ -201,6 +203,23 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
                 erpnext.create_lead(
                     lead_name=org_name,
                     notes="\n".join(lines).strip(),
+                    status="Lead",
+                )
+
+            opp = erpnext.find_open_opportunity_for_prospect(org_name)
+            if opp:
+                erpnext.set_opportunity_status(opp, "Converted")
+        else:
+            # Lower confidence: ensure a Prospect + an open Opportunity so it shows up in CRM search.
+            erpnext.ensure_prospect(org_name, company=erpnext_company)
+            opp = erpnext.find_open_opportunity_for_prospect(org_name)
+            if not opp:
+                erpnext.create_opportunity_for_prospect(
+                    org_name,
+                    company=erpnext_company,
+                    transaction_date=now.date().isoformat(),
+                    title=org_name,
+                    status="Open",
                 )
 
 
