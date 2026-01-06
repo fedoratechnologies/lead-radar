@@ -18,10 +18,12 @@ from .db import (
     upsert_signal,
 )
 from .erpnext import ERPNextClient
+from .intent import match_intent
 from .keyword_match import match_keywords
 from .org_extract import extract_org_candidate
 from .raw_store import RawStore, json_safe, raw_store_from_env
 from .rss import fetch_rss
+from .web import fetch_html_list, fetch_sitemap
 
 
 def _env(name: str) -> str | None:
@@ -59,28 +61,38 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
     touched_orgs: set[str] = set()
 
     for source in [s for s in config.sources if s.enabled]:
-        if source.type != "rss":
-            continue
-
-        entries = fetch_rss(source.url, user_agent=user_agent)
+        entries = _fetch_entries_for_source(source, user_agent=user_agent)
         for e in entries:
             text = f"{e.title}\n\n{e.summary}".strip()
             hits_by_pack: dict[str, list[dict]] = {}
-            score = 0.0
+            keyword_score = 0.0
 
             for pack in enabled_packs:
                 hits = match_keywords(text, pack.keywords)
                 if not hits:
                     continue
                 hits_by_pack[pack.id] = [asdict(h) for h in hits]
-                score += sum(h.weight for h in hits)
+                keyword_score += sum(h.weight for h in hits)
 
-            if score <= 0:
+            intent_hits = match_intent(text)
+            intent_score = sum(h.weight for h in intent_hits)
+
+            if (keyword_score + intent_score) <= 0:
                 continue
 
             org = extract_org_candidate(text)
             org_name = org.name if org else None
             org_conf = float(org.confidence) if org else None
+
+            score_details = _score_signal(
+                source_weight=float(source.weight),
+                source_tags=source.tags,
+                keyword_score=keyword_score,
+                intent_score=intent_score,
+                packs_hit_count=len(hits_by_pack),
+                org_confidence=org_conf,
+            )
+            signal_score = score_details["signal_score"]
 
             raw_payload: dict | None = None
             if raw_store:
@@ -95,7 +107,9 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
                     org_name=org_name,
                     org_confidence=org_conf,
                     keyword_hits=hits_by_pack,
-                    signal_score=score,
+                    intent_hits=[asdict(h) for h in intent_hits],
+                    score_details=score_details,
+                    signal_score=signal_score,
                     entry_raw=e.raw,
                 )
 
@@ -110,7 +124,7 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
                     org_name=org_name,
                     org_confidence=org_conf,
                     keyword_hits=hits_by_pack,
-                    signal_score=score,
+                    signal_score=signal_score,
                     raw=raw_payload or e.raw,
                 ),
             )
@@ -188,6 +202,8 @@ def _store_raw_signal(
     org_name: str | None,
     org_confidence: float | None,
     keyword_hits: dict[str, list[dict]],
+    intent_hits: list[dict],
+    score_details: dict,
     signal_score: float,
     entry_raw: dict,
 ) -> dict[str, Any] | None:
@@ -205,6 +221,8 @@ def _store_raw_signal(
             "org_name": org_name,
             "org_confidence": org_confidence,
             "keyword_hits": keyword_hits,
+            "intent_hits": intent_hits,
+            "score_details": score_details,
             "signal_score": signal_score,
             "entry_raw": entry_raw,
         }
@@ -221,3 +239,82 @@ def _store_raw_signal(
     except Exception as exc:
         print(f"WARNING: Failed to store raw signal to MinIO: {exc}")
         return None
+
+
+def _fetch_entries_for_source(source: Any, user_agent: str) -> list[Any]:
+    stype = str(getattr(source, "type", "") or "").strip().lower()
+    if stype == "rss":
+        return fetch_rss(source.url, user_agent=user_agent)
+    if stype == "sitemap":
+        return fetch_sitemap(
+            sitemap_url=source.url,
+            user_agent=user_agent,
+            max_items=int(getattr(source, "max_items", 20) or 20),
+            include_regex=getattr(source, "include_regex", None),
+            exclude_regex=getattr(source, "exclude_regex", None),
+        )
+    if stype in {"html_list", "html"}:
+        return fetch_html_list(
+            listing_url=source.url,
+            user_agent=user_agent,
+            max_items=int(getattr(source, "max_items", 20) or 20),
+            include_regex=getattr(source, "include_regex", None),
+            exclude_regex=getattr(source, "exclude_regex", None),
+        )
+    print(f"WARNING: Unsupported source type '{stype}' (source_id={getattr(source, 'id', '?')})")
+    return []
+
+
+def _score_signal(
+    source_weight: float,
+    source_tags: list[str],
+    keyword_score: float,
+    intent_score: float,
+    packs_hit_count: int,
+    org_confidence: float | None,
+) -> dict[str, Any]:
+    tag_multiplier = 1.0
+    applied: list[dict[str, Any]] = []
+    for tag in [t.strip().lower() for t in (source_tags or []) if str(t).strip()]:
+        mult = _TAG_MULTIPLIERS.get(tag, 1.0)
+        if mult != 1.0:
+            applied.append({"tag": tag, "multiplier": mult})
+        tag_multiplier *= mult
+
+    diversity_bonus = float(packs_hit_count) * 2.0 if packs_hit_count > 1 else 0.0
+    base = float(keyword_score) + float(intent_score) + diversity_bonus
+
+    total_mult = float(source_weight or 1.0) * tag_multiplier
+    if org_confidence is not None:
+        total_mult *= float(org_confidence)
+
+    return {
+        "keyword_score": float(keyword_score),
+        "intent_score": float(intent_score),
+        "diversity_bonus": float(diversity_bonus),
+        "source_weight": float(source_weight or 1.0),
+        "tag_multiplier": float(tag_multiplier),
+        "tag_multiplier_rules": applied,
+        "org_confidence_multiplier": float(org_confidence) if org_confidence is not None else None,
+        "total_multiplier": float(total_mult),
+        "signal_score": float(base) * float(total_mult),
+    }
+
+
+_TAG_MULTIPLIERS: dict[str, float] = {
+    # High-intent sources
+    "procurement": 1.6,
+    "tender": 1.6,
+    "rfp": 1.6,
+    "bid": 1.4,
+    "official": 1.3,
+    # Medium-intent sources
+    "jobs": 1.25,
+    "job": 1.25,
+    "careers": 1.2,
+    "hiring": 1.2,
+    "announcements": 1.15,
+    "announcement": 1.15,
+    # Default tags
+    "news": 1.0,
+}

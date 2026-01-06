@@ -23,6 +23,10 @@ class Source:
     name: str
     url: str
     tags: list[str]
+    weight: float
+    max_items: int
+    include_regex: str | None
+    exclude_regex: str | None
 
 
 @dataclass(frozen=True)
@@ -78,6 +82,14 @@ def load_config(config_dir: Path) -> LeadRadarConfig:
                 name=str(src.get("name", src["id"])),
                 url=str(src["url"]),
                 tags=[str(t) for t in (src.get("tags") or [])],
+                weight=float(src.get("weight", 1.0) or 1.0),
+                max_items=int(src.get("max_items", 20) or 20),
+                include_regex=str(src.get("include_regex")).strip()
+                if src.get("include_regex") is not None and str(src.get("include_regex")).strip()
+                else None,
+                exclude_regex=str(src.get("exclude_regex")).strip()
+                if src.get("exclude_regex") is not None and str(src.get("exclude_regex")).strip()
+                else None,
             )
         )
 
@@ -98,4 +110,3 @@ def load_config(config_dir: Path) -> LeadRadarConfig:
         )
 
     return LeadRadarConfig(scoring=scoring, sources=sources, keyword_packs=packs)
-
