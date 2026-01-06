@@ -13,15 +13,19 @@ class ERPNextClient:
     base_url: str
     api_key: str
     api_secret: str
+    site_host: str | None = None
     timeout_seconds: int = 30
 
     @property
     def _headers(self) -> dict[str, str]:
-        return {
+        headers = {
             "Authorization": f"token {self.api_key}:{self.api_secret}",
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
+        if self.site_host:
+            headers["Host"] = self.site_host
+        return headers
 
     def _url(self, path: str) -> str:
         return self.base_url.rstrip("/") + path

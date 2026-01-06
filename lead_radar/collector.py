@@ -41,11 +41,12 @@ def _env(name: str) -> str | None:
 
 def _erpnext_client_from_env() -> ERPNextClient | None:
     base_url = _env("LEAD_RADAR_ERPNEXT_BASE_URL")
+    site_host = _env("LEAD_RADAR_ERPNEXT_SITE_HOST") or _env("LEAD_RADAR_ERPNEXT_SITE")
     api_key = _env("LEAD_RADAR_ERPNEXT_API_KEY")
     api_secret = _env("LEAD_RADAR_ERPNEXT_API_SECRET")
     if not base_url or not api_key or not api_secret:
         return None
-    return ERPNextClient(base_url=base_url, api_key=api_key, api_secret=api_secret)
+    return ERPNextClient(base_url=base_url, api_key=api_key, api_secret=api_secret, site_host=site_host)
 
 
 def collect(config: LeadRadarConfig, config_dir: Path) -> None:
