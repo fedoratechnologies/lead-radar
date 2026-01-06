@@ -65,6 +65,36 @@ spec:
                       name: lead-radar-erpnext-api
                       key: api_secret
                       optional: true
+                - name: LEAD_RADAR_S3_ENDPOINT
+                  valueFrom:
+                    secretKeyRef:
+                      name: lead-radar-minio
+                      key: endpoint
+                - name: LEAD_RADAR_S3_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: lead-radar-minio
+                      key: access_key
+                - name: LEAD_RADAR_S3_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: lead-radar-minio
+                      key: secret_key
+                - name: LEAD_RADAR_S3_BUCKET
+                  valueFrom:
+                    secretKeyRef:
+                      name: lead-radar-minio
+                      key: bucket
+                - name: LEAD_RADAR_S3_PREFIX
+                  valueFrom:
+                    secretKeyRef:
+                      name: lead-radar-minio
+                      key: prefix
+                - name: LEAD_RADAR_S3_SECURE
+                  valueFrom:
+                    secretKeyRef:
+                      name: lead-radar-minio
+                      key: secure
                 - name: LEAD_RADAR_USER_AGENT
                   value: "lead-radar/0.1 (+https://github.com/fedoratechnologies/lead-radar)"
               volumeMounts:

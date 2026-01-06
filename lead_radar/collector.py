@@ -8,6 +8,7 @@ from pathlib import Path
 from .config import LeadRadarConfig, load_config
 from .db import (
     SignalRow,
+    content_hash,
     compute_org_aggregate,
     connect,
     ensure_schema,
@@ -19,6 +20,7 @@ from .db import (
 from .erpnext import ERPNextClient
 from .keyword_match import match_keywords
 from .org_extract import extract_org_candidate
+from .raw_store import RawStore, json_safe, raw_store_from_env
 from .rss import fetch_rss
 
 
@@ -52,6 +54,7 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
 
     enabled_packs = [p for p in config.keyword_packs if p.enabled]
     erpnext = _erpnext_client_from_env()
+    raw_store = _raw_store_init()
 
     touched_orgs: set[str] = set()
 
@@ -79,6 +82,23 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
             org_name = org.name if org else None
             org_conf = float(org.confidence) if org else None
 
+            raw_payload: dict | None = None
+            if raw_store:
+                raw_payload = _store_raw_signal(
+                    raw_store=raw_store,
+                    fetched_at=now,
+                    source_id=source.id,
+                    url=e.link,
+                    title=e.title,
+                    summary=e.summary,
+                    published_at=e.published_at,
+                    org_name=org_name,
+                    org_confidence=org_conf,
+                    keyword_hits=hits_by_pack,
+                    signal_score=score,
+                    entry_raw=e.raw,
+                )
+
             inserted = upsert_signal(
                 conn,
                 SignalRow(
@@ -91,7 +111,7 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
                     org_confidence=org_conf,
                     keyword_hits=hits_by_pack,
                     signal_score=score,
-                    raw=e.raw,
+                    raw=raw_payload or e.raw,
                 ),
             )
             if inserted and org_name:
@@ -136,3 +156,68 @@ def main() -> None:
     config = load_config(config_dir)
     collect(config=config, config_dir=config_dir)
 
+
+def _raw_store_init() -> RawStore | None:
+    raw_store = raw_store_from_env()
+    if not raw_store:
+        return None
+    try:
+        raw_store.ensure_bucket()
+    except Exception as exc:
+        print(f"WARNING: Failed to init raw store bucket '{raw_store.bucket}': {exc}")
+        return None
+    return raw_store
+
+
+def _raw_object_key(raw_store: RawStore, fetched_at: datetime, source_id: str, content_sha: str) -> str:
+    date_path = fetched_at.strftime("%Y/%m/%d")
+    prefix = raw_store.prefix.strip().strip("/")
+    if prefix:
+        return f"{prefix}/signals/{date_path}/{source_id}/{content_sha}.json"
+    return f"signals/{date_path}/{source_id}/{content_sha}.json"
+
+
+def _store_raw_signal(
+    raw_store: RawStore,
+    fetched_at: datetime,
+    source_id: str,
+    url: str,
+    title: str,
+    summary: str,
+    published_at: datetime | None,
+    org_name: str | None,
+    org_confidence: float | None,
+    keyword_hits: dict[str, list[dict]],
+    signal_score: float,
+    entry_raw: dict,
+) -> dict[str, Any] | None:
+    try:
+        sha = content_hash(source_id=source_id, url=url, title=title, summary=summary)
+        key = _raw_object_key(raw_store=raw_store, fetched_at=fetched_at, source_id=source_id, content_sha=sha)
+        artifact = {
+            "fetched_at": fetched_at.isoformat(),
+            "content_hash": sha,
+            "source_id": source_id,
+            "url": url,
+            "title": title,
+            "summary": summary,
+            "published_at": published_at.isoformat() if published_at else None,
+            "org_name": org_name,
+            "org_confidence": org_confidence,
+            "keyword_hits": keyword_hits,
+            "signal_score": signal_score,
+            "entry_raw": entry_raw,
+        }
+        loc = raw_store.put_json(key=key, payload=json_safe(artifact))
+        return {
+            "s3": {
+                "endpoint": raw_store.endpoint,
+                "bucket": loc.bucket,
+                "key": loc.key,
+                "etag": loc.etag,
+                "version_id": loc.version_id,
+            }
+        }
+    except Exception as exc:
+        print(f"WARNING: Failed to store raw signal to MinIO: {exc}")
+        return None
