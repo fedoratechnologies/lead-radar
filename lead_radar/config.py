@@ -9,6 +9,7 @@ import yaml
 
 @dataclass(frozen=True)
 class ScoringConfig:
+    time_zone: str
     window_days: int
     half_life_days: int
     min_signal_confidence: float
@@ -65,7 +66,9 @@ def load_config(config_dir: Path) -> LeadRadarConfig:
     sources_raw = _load_yaml(config_dir / "sources.yaml")
     packs_raw = _load_yaml(config_dir / "keyword_packs.yaml")
 
+    time_zone = str(scoring_raw.get("time_zone") or scoring_raw.get("timezone") or "UTC").strip() or "UTC"
     scoring = ScoringConfig(
+        time_zone=time_zone,
         window_days=int(scoring_raw["window_days"]),
         half_life_days=int(scoring_raw["half_life_days"]),
         min_signal_confidence=float(scoring_raw["min_signal_confidence"]),

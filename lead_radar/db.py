@@ -73,6 +73,27 @@ def ensure_schema(conn: psycopg.Connection) -> None:
     conn.commit()
 
 
+def prune_old_signals(conn: psycopg.Connection, since: datetime) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM signals
+            WHERE COALESCE(published_at, fetched_at) < %(since)s
+            """,
+            {"since": since},
+        )
+        deleted = int(cur.rowcount or 0)
+    conn.commit()
+    return deleted
+
+
+def list_org_names(conn: psycopg.Connection) -> list[str]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT name FROM organizations ORDER BY name")
+        rows = cur.fetchall() or []
+    return [str(r["name"]) for r in rows if r and r.get("name")]
+
+
 def content_hash(source_id: str, url: str, title: str, summary: str) -> str:
     h = hashlib.sha256()
     h.update(source_id.encode("utf-8"))

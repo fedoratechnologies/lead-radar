@@ -97,6 +97,8 @@ spec:
                       key: secure
                 - name: LEAD_RADAR_USER_AGENT
                   value: "lead-radar/0.1 (+https://github.com/fedoratechnologies/lead-radar)"
+                - name: TZ
+                  value: "America/Chicago"
               volumeMounts:
                 - name: config
                   mountPath: /config

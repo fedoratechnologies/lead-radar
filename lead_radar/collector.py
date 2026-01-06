@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .config import LeadRadarConfig, load_config
 from .db import (
@@ -14,6 +15,8 @@ from .db import (
     ensure_schema,
     get_recent_signals,
     get_last_signal_at,
+    list_org_names,
+    prune_old_signals,
     update_org_score,
     upsert_org,
     upsert_signal,
@@ -52,18 +55,28 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
     conn = connect(dsn)
     ensure_schema(conn)
 
-    now = datetime.now(tz=timezone.utc)
+    try:
+        tz = ZoneInfo(str(config.scoring.time_zone or "UTC"))
+    except Exception:
+        tz = timezone.utc
+    now = datetime.now(tz=tz)
+    since = now - timedelta(days=config.scoring.window_days)
     user_agent = _env("LEAD_RADAR_USER_AGENT") or "lead-radar/0.1 (+https://github.com/fedoratechnologies/lead-radar)"
 
     enabled_packs = [p for p in config.keyword_packs if p.enabled]
     erpnext = _erpnext_client_from_env()
     raw_store = _raw_store_init()
 
-    touched_orgs: set[str] = set()
+    inserted_signals = 0
+    skipped_too_old = 0
 
     for source in [s for s in config.sources if s.enabled]:
         entries = _fetch_entries_for_source(source, user_agent=user_agent)
         for e in entries:
+            if e.published_at and e.published_at < since:
+                skipped_too_old += 1
+                continue
+
             text = f"{e.title}\n\n{e.summary}".strip()
             hits_by_pack: dict[str, list[dict]] = {}
             keyword_score = 0.0
@@ -129,11 +142,22 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
                     raw=raw_payload or e.raw,
                 ),
             )
+            if inserted:
+                inserted_signals += 1
             if inserted and org_name:
                 upsert_org(conn, org_name)
-                touched_orgs.add(org_name)
 
-    for org_name in sorted(touched_orgs):
+    deleted = prune_old_signals(conn, since=since)
+    if deleted:
+        print(f"Pruned {deleted} signals older than {since.isoformat()}")
+
+    if inserted_signals or skipped_too_old:
+        print(
+            "Collector summary: "
+            f"inserted={inserted_signals} skipped_too_old={skipped_too_old} window_days={config.scoring.window_days}"
+        )
+
+    for org_name in list_org_names(conn):
         aggregate = compute_org_aggregate(
             conn,
             org_name=org_name,
