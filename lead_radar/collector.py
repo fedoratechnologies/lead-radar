@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,6 +16,7 @@ from .db import (
     ensure_schema,
     get_recent_signals,
     get_last_signal_at,
+    list_signals_for_org,
     list_org_names,
     prune_old_signals,
     update_org_score,
@@ -66,9 +68,11 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
     user_agent = _env("LEAD_RADAR_USER_AGENT") or "lead-radar/0.1 (+https://github.com/fedoratechnologies/lead-radar)"
 
     enabled_packs = [p for p in config.keyword_packs if p.enabled]
+    pack_by_id = {p.id: p for p in config.keyword_packs}
     erpnext = _erpnext_client_from_env()
     erpnext_company = _env("LEAD_RADAR_ERPNEXT_COMPANY") or "Fedora Technologies"
     raw_store = _raw_store_init()
+    source_by_id = {s.id: s for s in config.sources}
 
     inserted_signals = 0
     skipped_too_old = 0
@@ -183,45 +187,83 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
         if not erpnext or not last_signal_at:
             continue
 
-        if aggregate >= config.scoring.promote_threshold:
-            # High confidence: create Lead (if missing) and close any open Opportunity for this Prospect.
-            existing = erpnext.find_lead_by_name(org_name)
-            if not existing:
-                recent = get_recent_signals(conn, org_name=org_name, limit=3)
-                lines = [
-                    "Auto-created by Lead Radar.",
-                    f"Aggregate score: {aggregate:.2f} (raw={aggregate_raw:.2f})",
-                    "",
-                    "Recent signals:",
-                ]
-                for r in recent:
-                    ts = (r.get("published_at") or r.get("fetched_at"))
-                    ts_str = ts.isoformat() if ts else ""
-                    title = str(r.get("title") or "").strip()
-                    url = str(r.get("url") or "").strip()
-                    score = float(r.get("signal_score") or 0.0)
-                    lines.append(f"- {ts_str} score={score:.1f} {title} ({url})")
-                erpnext.create_lead(
-                    lead_name=org_name,
-                    notes="\n".join(lines).strip(),
-                    status="Lead",
-                )
+        try:
+            # Keep Opportunity probability aligned to Lead Radar's aggregate score (0-100).
+            probability = _clamp_probability(aggregate)
 
-            opp = erpnext.find_open_opportunity_for_prospect(org_name)
-            if opp:
-                erpnext.set_opportunity_status(opp, "Converted")
-        else:
-            # Lower confidence: ensure a Prospect + an open Opportunity so it shows up in CRM search.
-            erpnext.ensure_prospect(org_name, company=erpnext_company)
-            opp = erpnext.find_open_opportunity_for_prospect(org_name)
-            if not opp:
-                erpnext.create_opportunity_for_prospect(
-                    org_name,
-                    company=erpnext_company,
-                    transaction_date=now.date().isoformat(),
-                    title=org_name,
-                    status="Open",
+            signals = list_signals_for_org(conn, org_name=org_name, since=since)
+
+            if aggregate >= config.scoring.promote_threshold:
+                # High confidence: create Lead (if missing) and close any open Opportunity for this Prospect.
+                existing = erpnext.find_lead_by_name(org_name)
+                if not existing:
+                    recent = get_recent_signals(conn, org_name=org_name, limit=3)
+                    lines = [
+                        "Auto-created by Lead Radar.",
+                        f"Aggregate score: {aggregate:.2f} (raw={aggregate_raw:.2f})",
+                        "",
+                        "Recent signals:",
+                    ]
+                    for r in recent:
+                        ts = (r.get("published_at") or r.get("fetched_at"))
+                        ts_str = ts.isoformat() if ts else ""
+                        title = str(r.get("title") or "").strip()
+                        url = str(r.get("url") or "").strip()
+                        score = float(r.get("signal_score") or 0.0)
+                        lines.append(f"- {ts_str} score={score:.1f} {title} ({url})")
+                    erpnext.create_lead(
+                        lead_name=org_name,
+                        notes="\n".join(lines).strip(),
+                        status="Lead",
+                    )
+
+                # Ensure the Lead has full evidence attached.
+                lead_name = erpnext.find_lead_by_name(org_name)
+                if lead_name:
+                    _sync_evidence_notes(
+                        erpnext=erpnext,
+                        parenttype="Lead",
+                        parent=lead_name,
+                        org_name=org_name,
+                        signals=signals,
+                        source_by_id=source_by_id,
+                        pack_by_id=pack_by_id,
+                        tz=tz,
+                    )
+
+                # Close any open Opportunity for the Prospect.
+                opp = erpnext.find_open_opportunity_for_prospect(org_name)
+                if opp:
+                    erpnext.set_opportunity_probability(opp, probability)
+                    erpnext.set_opportunity_status(opp, "Converted")
+            else:
+                # Lower confidence: ensure a Prospect + an open Opportunity so it shows up in CRM search.
+                erpnext.ensure_prospect(org_name, company=erpnext_company)
+                opp = erpnext.find_open_opportunity_for_prospect(org_name)
+                if not opp:
+                    opp = erpnext.create_opportunity_for_prospect(
+                        org_name,
+                        company=erpnext_company,
+                        transaction_date=now.date().isoformat(),
+                        title=org_name,
+                        probability=probability,
+                        status="Open",
+                    )
+                else:
+                    erpnext.set_opportunity_probability(opp, probability)
+
+                _sync_evidence_notes(
+                    erpnext=erpnext,
+                    parenttype="Opportunity",
+                    parent=opp,
+                    org_name=org_name,
+                    signals=signals,
+                    source_by_id=source_by_id,
+                    pack_by_id=pack_by_id,
+                    tz=tz,
                 )
+        except Exception as exc:
+            print(f"WARNING: ERPNext sync failed for org '{org_name}': {exc}")
 
 
 def main() -> None:
@@ -287,13 +329,17 @@ def _store_raw_signal(
         }
         loc = raw_store.put_json(key=key, payload=json_safe(artifact))
         return {
-            "s3": {
-                "endpoint": raw_store.endpoint,
-                "bucket": loc.bucket,
-                "key": loc.key,
-                "etag": loc.etag,
-                "version_id": loc.version_id,
-            }
+	            "s3": {
+	                "endpoint": raw_store.endpoint,
+	                "bucket": loc.bucket,
+	                "key": loc.key,
+	                "etag": loc.etag,
+	                "version_id": loc.version_id,
+	            },
+            # Also store a small, query-friendly subset inline in Postgres so ERPNext notes
+            # can display evidence without fetching MinIO objects.
+            "intent_hits": intent_hits,
+            "score_details": score_details,
         }
     except Exception as exc:
         print(f"WARNING: Failed to store raw signal to MinIO: {exc}")
@@ -377,3 +423,206 @@ _TAG_MULTIPLIERS: dict[str, float] = {
     # Default tags
     "news": 1.0,
 }
+
+
+_EVIDENCE_HASH_RE = re.compile(r"LeadRadarHash\\s*[:=]\\s*([0-9a-f]{64})", flags=re.IGNORECASE)
+
+
+def _clamp_probability(value: float) -> float:
+    try:
+        v = float(value)
+    except Exception:
+        return 0.0
+    if v < 0:
+        v = 0.0
+    if v > 100:
+        v = 100.0
+    return round(v, 1)
+
+
+def _extract_existing_hashes(notes: list[dict] | None) -> set[str]:
+    out: set[str] = set()
+    for row in notes or []:
+        text = str((row or {}).get("note") or "")
+        m = _EVIDENCE_HASH_RE.search(text)
+        if not m:
+            continue
+        out.add(m.group(1).lower())
+    return out
+
+
+def _format_keyword_hits(keyword_hits: dict, pack_by_id: dict[str, Any]) -> str:
+    if not keyword_hits:
+        return ""
+    lines: list[str] = []
+    for pack_id, hits in (keyword_hits or {}).items():
+        pack_name = None
+        pack = pack_by_id.get(str(pack_id))
+        if pack:
+            pack_name = getattr(pack, "name", None)
+        label = f"{pack_id}" + (f" ({pack_name})" if pack_name else "")
+        kws: list[str] = []
+        for hit in hits or []:
+            kw = str((hit or {}).get("keyword") or "").strip()
+            if not kw:
+                continue
+            w = (hit or {}).get("weight")
+            try:
+                wv = float(w)
+            except Exception:
+                wv = None
+            kws.append(f"{kw}" + (f" (w={wv:g})" if wv is not None else ""))
+        if kws:
+            lines.append(f"- {label}: " + ", ".join(kws))
+    return "\n".join(lines).strip()
+
+
+def _format_intent_hits(intent_hits: list[dict] | None) -> str:
+    if not intent_hits:
+        return ""
+    parts: list[str] = []
+    for hit in intent_hits:
+        label = str((hit or {}).get("label") or (hit or {}).get("intent") or "").strip()
+        if not label:
+            continue
+        w = (hit or {}).get("weight")
+        try:
+            wv = float(w)
+        except Exception:
+            wv = None
+        parts.append(f"{label}" + (f" (w={wv:g})" if wv is not None else ""))
+    if not parts:
+        return ""
+    return "- " + ", ".join(parts)
+
+
+def _sync_evidence_notes(
+    *,
+    erpnext: ERPNextClient,
+    parenttype: str,
+    parent: str,
+    org_name: str,
+    signals: list[dict],
+    source_by_id: dict[str, Any],
+    pack_by_id: dict[str, Any],
+    tz: timezone | ZoneInfo,
+) -> None:
+    if not signals:
+        return
+
+    doc = erpnext.get_resource(parenttype, parent, fields=["name", "notes"])
+    existing_hashes = _extract_existing_hashes(doc.get("notes"))
+
+    created = 0
+    for s in signals:
+        chash = str(s.get("content_hash") or "").strip().lower()
+        if not chash or len(chash) != 64:
+            continue
+        if chash in existing_hashes:
+            continue
+
+        source_id = str(s.get("source_id") or "").strip()
+        src = source_by_id.get(source_id)
+        src_name = getattr(src, "name", None) if src else None
+        src_type = getattr(src, "type", None) if src else None
+        src_tags = getattr(src, "tags", None) if src else None
+        src_weight = getattr(src, "weight", None) if src else None
+
+        ts = s.get("published_at") or s.get("fetched_at")
+        if ts is not None and getattr(ts, "tzinfo", None) is not None:
+            ts_local = ts.astimezone(tz)
+            ts_str = ts_local.isoformat()
+        elif ts is not None:
+            ts_str = str(ts)
+        else:
+            ts_str = ""
+
+        title = str(s.get("title") or "").strip()
+        url = str(s.get("url") or "").strip()
+        summary = str(s.get("summary") or "").strip()
+        if len(summary) > 600:
+            summary = summary[:597].rstrip() + "..."
+
+        try:
+            score = float(s.get("signal_score") or 0.0)
+        except Exception:
+            score = 0.0
+
+        conf = s.get("org_confidence")
+        try:
+            conf_f = float(conf) if conf is not None else None
+        except Exception:
+            conf_f = None
+
+        raw = s.get("raw") or {}
+        if not isinstance(raw, dict):
+            raw = {}
+        s3 = raw.get("s3") if isinstance(raw.get("s3"), dict) else None
+        intent_hits = raw.get("intent_hits") if isinstance(raw.get("intent_hits"), list) else None
+        score_details = raw.get("score_details") if isinstance(raw.get("score_details"), dict) else None
+
+        lines: list[str] = []
+        lines.append("Lead Radar Evidence")
+        lines.append(f"LeadRadarHash: {chash}")
+        lines.append(f"Org: {org_name}" + (f" (conf={conf_f:.2f})" if conf_f is not None else ""))
+        if source_id:
+            src_line = f"Source: {source_id}"
+            if src_name:
+                src_line += f" ({src_name})"
+            if src_type:
+                src_line += f" type={src_type}"
+            if src_tags:
+                src_line += " tags=" + ",".join([str(t) for t in (src_tags or []) if str(t).strip()])
+            if src_weight is not None:
+                try:
+                    src_line += f" weight={float(src_weight):g}"
+                except Exception:
+                    pass
+            lines.append(src_line)
+        if ts_str:
+            lines.append(f"Published: {ts_str}")
+        lines.append(f"Signal score: {score:.2f}")
+        if score_details:
+            base = (
+                float(score_details.get("keyword_score") or 0)
+                + float(score_details.get("intent_score") or 0)
+                + float(score_details.get("diversity_bonus") or 0)
+            )
+            lines.append(f"Score details: base={base:.2f} mult={float(score_details.get('total_multiplier') or 1.0):.2f}")
+        if url:
+            lines.append(f"URL: {url}")
+        if title:
+            lines.append(f"Title: {title}")
+        if summary:
+            lines.append("")
+            lines.append("Summary:")
+            lines.append(summary)
+
+        kw_block = _format_keyword_hits(s.get("keyword_hits") or {}, pack_by_id=pack_by_id)
+        if kw_block:
+            lines.append("")
+            lines.append("Keyword hits:")
+            lines.append(kw_block)
+
+        intent_block = _format_intent_hits(intent_hits)
+        if intent_block:
+            lines.append("")
+            lines.append("Intent hits:")
+            lines.append(intent_block)
+
+        if s3:
+            endpoint = str(s3.get("endpoint") or "").strip()
+            bucket = str(s3.get("bucket") or "").strip()
+            key = str(s3.get("key") or "").strip()
+            if bucket and key:
+                lines.append("")
+                lines.append("Raw artifact:")
+                lines.append(f"- s3://{bucket}/{key}" + (f" (endpoint={endpoint})" if endpoint else ""))
+
+        note_text = "\n".join([ln for ln in lines if ln is not None]).strip()
+        erpnext.create_crm_note(parenttype=parenttype, parent=parent, note=note_text)
+        existing_hashes.add(chash)
+        created += 1
+
+    if created:
+        print(f"ERPNext evidence sync: parent={parenttype}/{parent} org='{org_name}' created_notes={created}")

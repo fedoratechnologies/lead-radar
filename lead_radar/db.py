@@ -262,3 +262,52 @@ def get_recent_signals(
         )
         rows = cur.fetchall() or []
     return [dict(r) for r in rows]
+
+
+def list_signals_for_org(
+    conn: psycopg.Connection,
+    org_name: str,
+    *,
+    since: datetime | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """
+    List signals for an org newest-first.
+    """
+    where_since = ""
+    params: dict[str, Any] = {"org_name": org_name}
+    if since is not None:
+        where_since = "AND COALESCE(published_at, fetched_at) >= %(since)s"
+        params["since"] = since
+
+    limit_sql = ""
+    if limit is not None:
+        limit_sql = "LIMIT %(limit)s"
+        params["limit"] = int(limit)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT
+              source_id,
+              url,
+              title,
+              summary,
+              published_at,
+              fetched_at,
+              content_hash,
+              org_name,
+              org_confidence,
+              keyword_hits,
+              signal_score,
+              raw
+            FROM signals
+            WHERE org_name = %(org_name)s
+              {where_since}
+            ORDER BY COALESCE(published_at, fetched_at) DESC
+            {limit_sql}
+            """,
+            params,
+        )
+        rows = cur.fetchall() or []
+    return [dict(r) for r in rows]

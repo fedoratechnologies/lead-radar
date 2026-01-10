@@ -54,6 +54,48 @@ class ERPNextClient:
             **kwargs,
         )
 
+    def delete(self, path: str, **kwargs: Any) -> requests.Response:
+        return requests.delete(
+            self._url(path),
+            headers=self._headers,
+            timeout=self.timeout_seconds,
+            **kwargs,
+        )
+
+    def get_resource(self, doctype: str, name: str, *, fields: list[str] | None = None) -> dict[str, Any]:
+        params: dict[str, Any] | None = None
+        if fields:
+            params = {"fields": json.dumps(fields)}
+        path = "/api/resource/" + quote(doctype, safe="") + "/" + quote(name, safe="")
+        resp = self.get(path, params=params)
+        resp.raise_for_status()
+        return dict(resp.json().get("data") or {})
+
+    def create_crm_note(
+        self,
+        *,
+        parenttype: str,
+        parent: str,
+        note: str,
+        parentfield: str = "notes",
+    ) -> str:
+        payload: dict[str, Any] = {
+            "doctype": "CRM Note",
+            "parent": parent,
+            "parenttype": parenttype,
+            "parentfield": parentfield,
+            "note": note,
+        }
+        resp = self.post("/api/resource/CRM%20Note", json=payload)
+        resp.raise_for_status()
+        name = resp.json().get("data", {}).get("name")
+        return str(name) if name is not None else ""
+
+    def update_resource(self, doctype: str, name: str, fields: dict[str, Any]) -> None:
+        path = "/api/resource/" + quote(doctype, safe="") + "/" + quote(name, safe="")
+        resp = self.put(path, json=fields)
+        resp.raise_for_status()
+
     def find_lead_by_name(self, lead_name: str) -> str | None:
         resp = self.get(
             "/api/resource/Lead",
@@ -141,6 +183,7 @@ class ERPNextClient:
         company: str,
         transaction_date: str,
         title: str | None = None,
+        probability: float | None = None,
         status: str = "Open",
         naming_series: str = "CRM-OPP-.YYYY.-",
     ) -> str:
@@ -154,11 +197,14 @@ class ERPNextClient:
         }
         if title:
             payload["title"] = title
+        if probability is not None:
+            payload["probability"] = float(probability)
         resp = self.post("/api/resource/Opportunity", json=payload)
         resp.raise_for_status()
         return str(resp.json()["data"]["name"])
 
     def set_opportunity_status(self, opportunity_name: str, status: str) -> None:
-        path = "/api/resource/Opportunity/" + quote(opportunity_name, safe="")
-        resp = self.put(path, json={"status": status})
-        resp.raise_for_status()
+        self.update_resource("Opportunity", opportunity_name, {"status": status})
+
+    def set_opportunity_probability(self, opportunity_name: str, probability: float) -> None:
+        self.update_resource("Opportunity", opportunity_name, {"probability": float(probability)})
