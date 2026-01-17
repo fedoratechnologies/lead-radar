@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import feedparser
+import requests
 from dateutil import parser as date_parser
 
 
@@ -30,7 +31,25 @@ def _parse_datetime(value: str | None) -> datetime | None:
 
 
 def fetch_rss(url: str, user_agent: str) -> list[RssEntry]:
-    parsed = feedparser.parse(url, agent=user_agent)
+    try:
+        resp = requests.get(
+            url,
+            headers={
+                "User-Agent": user_agent,
+                "Accept": "application/rss+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+            timeout=30,
+            allow_redirects=True,
+        )
+    except Exception as exc:
+        print(f"WARNING: RSS fetch failed url={url} err={exc}")
+        return []
+
+    if resp.status_code != 200:
+        print(f"WARNING: RSS fetch returned status={resp.status_code} url={url}")
+        return []
+
+    parsed = feedparser.parse(resp.content)
     entries: list[RssEntry] = []
 
     for e in parsed.entries:
@@ -54,4 +73,3 @@ def fetch_rss(url: str, user_agent: str) -> list[RssEntry]:
             )
         )
     return entries
-
