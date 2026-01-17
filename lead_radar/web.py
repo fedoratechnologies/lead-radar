@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlsplit, urlunsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -192,57 +192,193 @@ def _normalize_links(base_url: str, hrefs: Iterable[str]) -> list[str]:
     return out
 
 
+def _set_query_param(url: str, name: str, value: str) -> str:
+    parts = urlsplit(url)
+    pairs = [(k, v) for (k, v) in parse_qsl(parts.query, keep_blank_values=True) if k != name]
+    pairs.append((name, value))
+    query = urlencode(pairs, doseq=True)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
+
+
+def _parse_reliefweb_river_entries(
+    soup: BeautifulSoup,
+    *,
+    include_re: re.Pattern | None,
+    exclude_re: re.Pattern | None,
+) -> list[WebEntry]:
+    entries: list[WebEntry] = []
+    for article in soup.find_all("article", class_=lambda c: c and "rw-river-article" in str(c)):
+        title_el = article.find("h3", class_="rw-river-article__title")
+        a = title_el.find("a", href=True) if title_el else None
+        if not a:
+            continue
+
+        link = str(a.get("href") or "").strip()
+        if not link:
+            continue
+        if include_re and not include_re.search(link):
+            continue
+        if exclude_re and exclude_re.search(link):
+            continue
+
+        title = a.get_text(" ", strip=True) or link
+
+        summary = ""
+        content = article.find("div", class_="rw-river-article__content")
+        if content:
+            p = content.find("p")
+            if p:
+                summary = p.get_text(" ", strip=True)
+
+        meta: dict[str, Any] = {}
+        sources: list[str] = []
+        orgs: list[str] = []
+        posted_dt: datetime | None = None
+        published_dt: datetime | None = None
+
+        dl = article.find("dl", class_=lambda c: c and "rw-entity-meta--core" in str(c))
+        if dl:
+            for dt_el in dl.find_all("dt"):
+                label = dt_el.get_text(" ", strip=True)
+                if not label:
+                    continue
+                dd_el = dt_el.find_next_sibling("dd")
+                if not dd_el:
+                    continue
+
+                time_el = dd_el.find("time")
+                if time_el and time_el.get("datetime"):
+                    dt_val = _parse_datetime(str(time_el.get("datetime")))
+                    if label.lower() == "posted":
+                        posted_dt = dt_val or posted_dt
+                    if label.lower() in {"originally published", "published"}:
+                        published_dt = dt_val or published_dt
+
+                if label.lower() in {"source", "sources"}:
+                    for a_el in dd_el.find_all("a"):
+                        t = a_el.get_text(" ", strip=True)
+                        if t:
+                            sources.append(t)
+                if label.lower() == "organization":
+                    for a_el in dd_el.find_all("a"):
+                        t = a_el.get_text(" ", strip=True)
+                        if t:
+                            orgs.append(t)
+
+                meta[label] = dd_el.get_text(" ", strip=True)
+
+        published_at = posted_dt or published_dt
+
+        prefix_lines: list[str] = []
+        if orgs:
+            prefix_lines.append(f"Organization: {', '.join(orgs)}")
+        if sources:
+            prefix_lines.append(f"Source: {', '.join(sources)}")
+
+        combined_summary = summary or ""
+        if prefix_lines:
+            combined_summary = "\n".join(prefix_lines + ([combined_summary] if combined_summary else []))
+
+        entries.append(
+            WebEntry(
+                title=title,
+                link=link,
+                summary=combined_summary,
+                published_at=published_at,
+                raw={
+                    "kind": "reliefweb_river_item",
+                    "title": title,
+                    "link": link,
+                    "summary": combined_summary,
+                    "published_at": published_at.isoformat() if published_at else None,
+                    "meta": meta,
+                },
+            )
+        )
+    return entries
+
+
 def fetch_html_list(
     listing_url: str,
     user_agent: str,
     max_items: int = 20,
     include_regex: str | None = None,
     exclude_regex: str | None = None,
+    max_pages: int = 1,
+    page_param: str = "page",
+    start_page: int = 0,
 ) -> list[WebEntry]:
     include_re = _compile_regex(include_regex)
     exclude_re = _compile_regex(exclude_regex)
 
-    resp = _http_get(
-        url=listing_url,
-        user_agent=user_agent,
-        accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        timeout_seconds=30,
-    )
-    if resp.status_code != 200:
-        return []
-
-    soup = BeautifulSoup(resp.text or "", "html.parser")
-    hrefs = [str(a.get("href")) for a in soup.find_all("a", href=True)]
-    links = _normalize_links(resp.url or listing_url, hrefs)
-
-    filtered: list[str] = []
-    for link in links:
-        if include_re and not include_re.search(link):
-            continue
-        if exclude_re and exclude_re.search(link):
-            continue
-        filtered.append(link)
-        if len(filtered) >= max_items:
-            break
-
+    seen_links: set[str] = set()
     entries: list[WebEntry] = []
-    for link in filtered:
-        entry = fetch_web_page(url=link, user_agent=user_agent)
-        if not entry:
-            continue
-        entries.append(
-            WebEntry(
-                title=entry.title,
-                link=entry.link,
-                summary=entry.summary,
-                published_at=entry.published_at,
-                raw={
-                    "kind": "html_list_item",
-                    "listing_url": listing_url,
-                    "item": entry.raw,
-                },
-            )
+
+    pages = int(max_pages or 1)
+    if pages < 1:
+        pages = 1
+
+    for i in range(pages):
+        page_value = int(start_page or 0) + i
+        page_url = listing_url if pages == 1 else _set_query_param(listing_url, page_param, str(page_value))
+
+        resp = _http_get(
+            url=page_url,
+            user_agent=user_agent,
+            accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            timeout_seconds=30,
         )
+        if resp.status_code != 200:
+            continue
+
+        soup = BeautifulSoup(resp.text or "", "html.parser")
+
+        # ReliefWeb's list pages expose useful summary + metadata inline, avoid fetching each detail page.
+        river_entries = _parse_reliefweb_river_entries(soup, include_re=include_re, exclude_re=exclude_re)
+        if river_entries:
+            for e in river_entries:
+                if e.link in seen_links:
+                    continue
+                seen_links.add(e.link)
+                entries.append(e)
+                if len(entries) >= max_items:
+                    return entries
+            continue
+
+        hrefs = [str(a.get("href")) for a in soup.find_all("a", href=True)]
+        links = _normalize_links(resp.url or page_url, hrefs)
+
+        filtered: list[str] = []
+        for link in links:
+            if include_re and not include_re.search(link):
+                continue
+            if exclude_re and exclude_re.search(link):
+                continue
+            if link in seen_links:
+                continue
+            seen_links.add(link)
+            filtered.append(link)
+
+        for link in filtered:
+            if len(entries) >= max_items:
+                return entries
+            entry = fetch_web_page(url=link, user_agent=user_agent)
+            if not entry:
+                continue
+            entries.append(
+                WebEntry(
+                    title=entry.title,
+                    link=entry.link,
+                    summary=entry.summary,
+                    published_at=entry.published_at,
+                    raw={
+                        "kind": "html_list_item",
+                        "listing_url": page_url,
+                        "item": entry.raw,
+                    },
+                )
+            )
+
     return entries
 
 
@@ -331,4 +467,3 @@ def fetch_sitemap(
             )
         )
     return entries
-

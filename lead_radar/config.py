@@ -27,6 +27,9 @@ class Source:
     tags: list[str]
     weight: float
     max_items: int
+    max_pages: int
+    page_param: str
+    start_page: int
     include_regex: str | None
     exclude_regex: str | None
 
@@ -89,6 +92,9 @@ def load_config(config_dir: Path) -> LeadRadarConfig:
                 tags=[str(t) for t in (src.get("tags") or [])],
                 weight=float(src.get("weight", 1.0) or 1.0),
                 max_items=int(src.get("max_items", 20) or 20),
+                max_pages=int(src.get("max_pages", 1) or 1),
+                page_param=str(src.get("page_param") or "page").strip() or "page",
+                start_page=int(src.get("start_page", 0) or 0),
                 include_regex=str(src.get("include_regex")).strip()
                 if src.get("include_regex") is not None and str(src.get("include_regex")).strip()
                 else None,

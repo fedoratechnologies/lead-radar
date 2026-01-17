@@ -106,9 +106,11 @@ def content_hash(source_id: str, url: str, title: str, summary: str) -> str:
     return h.hexdigest()
 
 
-def upsert_signal(conn: psycopg.Connection, signal: SignalRow) -> bool:
+def upsert_signal(conn: psycopg.Connection, signal: SignalRow) -> tuple[bool, bool]:
     """
-    Insert signal if it doesn't exist. Returns True if inserted.
+    Insert signal if it doesn't exist, or backfill missing org fields.
+
+    Returns (inserted, updated).
     """
     signal_id = uuid.uuid4()
     chash = content_hash(signal.source_id, signal.url, signal.title, signal.summary)
@@ -124,7 +126,19 @@ def upsert_signal(conn: psycopg.Connection, signal: SignalRow) -> bool:
               %(id)s, %(source_id)s, %(url)s, %(title)s, %(summary)s, %(published_at)s, %(content_hash)s,
               %(org_name)s, %(org_confidence)s, %(keyword_hits)s::jsonb, %(signal_score)s, %(raw)s::jsonb
             )
-            ON CONFLICT (source_id, url) DO NOTHING
+            ON CONFLICT (source_id, url) DO UPDATE SET
+              title = EXCLUDED.title,
+              summary = EXCLUDED.summary,
+              published_at = COALESCE(signals.published_at, EXCLUDED.published_at),
+              content_hash = EXCLUDED.content_hash,
+              org_name = COALESCE(signals.org_name, EXCLUDED.org_name),
+              org_confidence = COALESCE(signals.org_confidence, EXCLUDED.org_confidence),
+              keyword_hits = EXCLUDED.keyword_hits,
+              signal_score = EXCLUDED.signal_score,
+              raw = EXCLUDED.raw
+            WHERE (signals.org_name IS NULL AND EXCLUDED.org_name IS NOT NULL)
+               OR (signals.org_confidence IS NULL AND EXCLUDED.org_confidence IS NOT NULL)
+            RETURNING (xmax = 0) AS inserted
             """,
             {
                 "id": str(signal_id),
@@ -141,9 +155,15 @@ def upsert_signal(conn: psycopg.Connection, signal: SignalRow) -> bool:
                 "raw": json.dumps(signal.raw, ensure_ascii=False),
             },
         )
-        inserted = cur.rowcount == 1
+        row = cur.fetchone()
+        if not row:
+            inserted = False
+            updated = False
+        else:
+            inserted = bool(row.get("inserted"))
+            updated = not inserted
     conn.commit()
-    return inserted
+    return inserted, updated
 
 
 def upsert_org(conn: psycopg.Connection, name: str) -> uuid.UUID:

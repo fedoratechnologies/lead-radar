@@ -75,6 +75,7 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
     source_by_id = {s.id: s for s in config.sources}
 
     inserted_signals = 0
+    updated_signals = 0
     skipped_too_old = 0
 
     for source in [s for s in config.sources if s.enabled]:
@@ -134,7 +135,7 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
                     entry_raw=e.raw,
                 )
 
-            inserted = upsert_signal(
+            inserted, updated = upsert_signal(
                 conn,
                 SignalRow(
                     source_id=source.id,
@@ -151,17 +152,20 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
             )
             if inserted:
                 inserted_signals += 1
-            if inserted and org_name:
+            if updated:
+                updated_signals += 1
+            if (inserted or updated) and org_name:
                 upsert_org(conn, org_name)
 
     deleted = prune_old_signals(conn, since=since)
     if deleted:
         print(f"Pruned {deleted} signals older than {since.isoformat()}")
 
-    if inserted_signals or skipped_too_old:
+    if inserted_signals or updated_signals or skipped_too_old:
         print(
             "Collector summary: "
-            f"inserted={inserted_signals} skipped_too_old={skipped_too_old} window_days={config.scoring.window_days}"
+            f"inserted={inserted_signals} updated={updated_signals} skipped_too_old={skipped_too_old} "
+            f"window_days={config.scoring.window_days}"
         )
 
     for org_name in list_org_names(conn):
@@ -365,6 +369,9 @@ def _fetch_entries_for_source(source: Any, user_agent: str) -> list[Any]:
             max_items=int(getattr(source, "max_items", 20) or 20),
             include_regex=getattr(source, "include_regex", None),
             exclude_regex=getattr(source, "exclude_regex", None),
+            max_pages=int(getattr(source, "max_pages", 1) or 1),
+            page_param=str(getattr(source, "page_param", "page") or "page"),
+            start_page=int(getattr(source, "start_page", 0) or 0),
         )
     print(f"WARNING: Unsupported source type '{stype}' (source_id={getattr(source, 'id', '?')})")
     return []
