@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -79,9 +80,18 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
     skipped_too_old = 0
 
     for source in [s for s in config.sources if s.enabled]:
+        source_started = time.monotonic()
         entries = _fetch_entries_for_source(source, user_agent=user_agent)
+        source_fetched = len(entries)
+        source_inserted = 0
+        source_updated = 0
+        source_skipped_too_old = 0
+        source_skipped_no_match = 0
+        source_orgs: set[str] = set()
+
         for e in entries:
             if e.published_at and e.published_at < since:
+                source_skipped_too_old += 1
                 skipped_too_old += 1
                 continue
 
@@ -100,6 +110,7 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
             intent_score = sum(h.weight for h in intent_hits)
 
             if (keyword_score + intent_score) <= 0:
+                source_skipped_no_match += 1
                 continue
 
             org = extract_org_candidate(text)
@@ -152,10 +163,21 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
             )
             if inserted:
                 inserted_signals += 1
+                source_inserted += 1
             if updated:
                 updated_signals += 1
+                source_updated += 1
             if (inserted or updated) and org_name:
+                source_orgs.add(org_name)
                 upsert_org(conn, org_name)
+
+        elapsed = time.monotonic() - source_started
+        print(
+            "Source summary: "
+            f"id={source.id} fetched={source_fetched} inserted={source_inserted} updated={source_updated} "
+            f"skipped_too_old={source_skipped_too_old} skipped_no_match={source_skipped_no_match} "
+            f"orgs={len(source_orgs)} seconds={elapsed:.1f}"
+        )
 
     deleted = prune_old_signals(conn, since=since)
     if deleted:

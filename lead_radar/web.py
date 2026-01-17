@@ -203,6 +203,7 @@ def _set_query_param(url: str, name: str, value: str) -> str:
 def _parse_reliefweb_river_entries(
     soup: BeautifulSoup,
     *,
+    base_url: str,
     include_re: re.Pattern | None,
     exclude_re: re.Pattern | None,
 ) -> list[WebEntry]:
@@ -213,9 +214,10 @@ def _parse_reliefweb_river_entries(
         if not a:
             continue
 
-        link = str(a.get("href") or "").strip()
-        if not link:
+        href = str(a.get("href") or "").strip()
+        if not href:
             continue
+        link = urljoin(base_url, href)
         if include_re and not include_re.search(link):
             continue
         if exclude_re and exclude_re.search(link):
@@ -320,7 +322,8 @@ def fetch_html_list(
 
     for i in range(pages):
         page_value = int(start_page or 0) + i
-        page_url = listing_url if pages == 1 else _set_query_param(listing_url, page_param, str(page_value))
+        needs_page_param = pages > 1 or int(start_page or 0) != 0
+        page_url = listing_url if not needs_page_param else _set_query_param(listing_url, page_param, str(page_value))
 
         resp = _http_get(
             url=page_url,
@@ -334,7 +337,12 @@ def fetch_html_list(
         soup = BeautifulSoup(resp.text or "", "html.parser")
 
         # ReliefWeb's list pages expose useful summary + metadata inline, avoid fetching each detail page.
-        river_entries = _parse_reliefweb_river_entries(soup, include_re=include_re, exclude_re=exclude_re)
+        river_entries = _parse_reliefweb_river_entries(
+            soup,
+            base_url=str(resp.url or page_url),
+            include_re=include_re,
+            exclude_re=exclude_re,
+        )
         if river_entries:
             for e in river_entries:
                 if e.link in seen_links:
