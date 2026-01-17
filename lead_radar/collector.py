@@ -21,6 +21,7 @@ from .db import (
     list_org_names,
     prune_old_signals,
     update_org_score,
+    update_signal_raw,
     upsert_org,
     upsert_signal,
 )
@@ -127,8 +128,22 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
             )
             signal_score = score_details["signal_score"]
 
-            raw_payload: dict | None = None
-            if raw_store:
+            inserted, updated = upsert_signal(
+                conn,
+                SignalRow(
+                    source_id=source.id,
+                    url=e.link,
+                    title=e.title,
+                    summary=e.summary,
+                    published_at=e.published_at,
+                    org_name=org_name,
+                    org_confidence=org_conf,
+                    keyword_hits=hits_by_pack,
+                    signal_score=signal_score,
+                    raw=e.raw,
+                ),
+            )
+            if raw_store and (inserted or updated):
                 raw_payload = _store_raw_signal(
                     raw_store=raw_store,
                     fetched_at=now,
@@ -145,22 +160,8 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
                     signal_score=signal_score,
                     entry_raw=e.raw,
                 )
-
-            inserted, updated = upsert_signal(
-                conn,
-                SignalRow(
-                    source_id=source.id,
-                    url=e.link,
-                    title=e.title,
-                    summary=e.summary,
-                    published_at=e.published_at,
-                    org_name=org_name,
-                    org_confidence=org_conf,
-                    keyword_hits=hits_by_pack,
-                    signal_score=signal_score,
-                    raw=raw_payload or e.raw,
-                ),
-            )
+                if raw_payload:
+                    update_signal_raw(conn, source_id=source.id, url=e.link, raw=raw_payload)
             if inserted:
                 inserted_signals += 1
                 source_inserted += 1

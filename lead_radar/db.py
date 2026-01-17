@@ -166,6 +166,22 @@ def upsert_signal(conn: psycopg.Connection, signal: SignalRow) -> tuple[bool, bo
     return inserted, updated
 
 
+def update_signal_raw(conn: psycopg.Connection, *, source_id: str, url: str, raw: dict[str, Any]) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE signals
+            SET raw = %(raw)s::jsonb
+            WHERE source_id = %(source_id)s
+              AND url = %(url)s
+            """,
+            {"source_id": source_id, "url": url, "raw": json.dumps(raw, ensure_ascii=False)},
+        )
+        updated = int(cur.rowcount or 0) > 0
+    conn.commit()
+    return updated
+
+
 def upsert_org(conn: psycopg.Connection, name: str) -> uuid.UUID:
     normalized = normalize_org_name(name)
     with conn.cursor() as cur:

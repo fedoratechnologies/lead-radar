@@ -44,6 +44,8 @@ spec:
                   export LEAD_RADAR_ERPNEXT_SITE_HOST="cleopatra.fedora.solutions"
                   lead-radar-collector
               env:
+                - name: PYTHONUNBUFFERED
+                  value: "1"
                 - name: DB_USERNAME
                   valueFrom:
                     secretKeyRef:
