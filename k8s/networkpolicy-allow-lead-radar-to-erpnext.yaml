@@ -16,6 +16,9 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: lead-radar
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
       ports:
         - protocol: TCP
           port: 8080
