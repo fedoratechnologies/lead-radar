@@ -13,12 +13,18 @@ spec:
     - Ingress
   ingress:
     - from:
+        # Allow same-namespace traffic (ERPNext internals, health checks, etc.)
+        - podSelector: {}
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: lead-radar
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: ingress-nginx
+        # Fallback for policy-only CNI edge cases (Calico policy + Flannel networking):
+        # allow from the pod CIDR so ingress-nginx can always reach the ERPNext front-end.
+        - ipBlock:
+            cidr: 10.200.0.0/16
       ports:
         - protocol: TCP
           port: 8080
