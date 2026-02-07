@@ -25,6 +25,10 @@ spec:
         # allow from the pod CIDR so ingress-nginx can always reach the ERPNext front-end.
         - ipBlock:
             cidr: 10.200.0.0/16
+        # If any node-level SNAT is occurring (e.g., policy-only CNI edge cases),
+        # allow connections that appear to originate from node IPs as well.
+        - ipBlock:
+            cidr: 192.168.20.0/24
       ports:
         - protocol: TCP
           port: 8080
