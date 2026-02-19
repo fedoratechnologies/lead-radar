@@ -28,6 +28,7 @@ from .db import (
 from .erpnext import ERPNextClient
 from .intent import match_intent
 from .keyword_match import match_keywords
+from .hubdirectory import hubdirectory_client_from_env
 from .org_extract import extract_org_candidate
 from .raw_store import RawStore, json_safe, raw_store_from_env
 from .rss import fetch_rss
@@ -72,9 +73,15 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
     enabled_packs = [p for p in config.keyword_packs if p.enabled]
     pack_by_id = {p.id: p for p in config.keyword_packs}
     erpnext = _erpnext_client_from_env()
+    hubdirectory = hubdirectory_client_from_env()
     erpnext_company = _env("LEAD_RADAR_ERPNEXT_COMPANY") or "Fedora Technologies"
     raw_store = _raw_store_init()
     source_by_id = {s.id: s for s in config.sources}
+
+    hub_min_score = float(_env("LEAD_RADAR_HUB_MIN_SCORE") or (config.scoring.promote_threshold or 0))
+    hub_max_orgs = int(_env("LEAD_RADAR_HUB_MAX_ORGS") or "200")
+    hub_batch_size = int(_env("LEAD_RADAR_HUB_BATCH_SIZE") or "100")
+    hub_org_updates: list[dict] = []
 
     inserted_signals = 0
     updated_signals = 0
@@ -211,6 +218,19 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
             promoted_at=promoted_at,
         )
 
+        if hubdirectory and last_signal_at and aggregate >= hub_min_score and len(hub_org_updates) < hub_max_orgs:
+            recent = get_recent_signals(conn, org_name=org_name, limit=5)
+            hub_org_updates.append(
+                {
+                    "org_name": org_name,
+                    "aggregate_score": round(float(aggregate), 2),
+                    "aggregate_raw": round(float(aggregate_raw), 4),
+                    "last_signal_at": last_signal_at.isoformat(),
+                    "promoted_at": promoted_at.isoformat() if promoted_at else None,
+                    "signals": [_json_safe_signal_row(row) for row in (recent or [])],
+                }
+            )
+
         if not erpnext or not last_signal_at:
             continue
 
@@ -291,6 +311,24 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
                 )
         except Exception as exc:
             print(f"WARNING: ERPNext sync failed for org '{org_name}': {exc}")
+
+    if hubdirectory and hub_org_updates:
+        sent_total = 0
+        batches = list(_chunked(hub_org_updates, hub_batch_size))
+        for index, batch in enumerate(batches, start=1):
+            try:
+                result = hubdirectory.ingest_organizations(batch)
+                sent_total += len(batch)
+                inserted = int(result.get("inserted") or 0) if isinstance(result, dict) else 0
+                updated = int(result.get("updated") or 0) if isinstance(result, dict) else 0
+                skipped = int(result.get("skipped") or 0) if isinstance(result, dict) else 0
+                print(
+                    "HubDirectory ingest summary: "
+                    f"batch={index}/{len(batches)} sent={len(batch)} inserted={inserted} updated={updated} skipped={skipped}"
+                )
+            except Exception as exc:
+                print(f"WARNING: HubDirectory ingest failed (batch {index}/{len(batches)}): {exc}")
+        print(f"HubDirectory ingest total: sent={sent_total} min_score={hub_min_score:g} max_orgs={hub_max_orgs}")
 
 
 def main() -> None:
@@ -398,6 +436,31 @@ def _fetch_entries_for_source(source: Any, user_agent: str) -> list[Any]:
         )
     print(f"WARNING: Unsupported source type '{stype}' (source_id={getattr(source, 'id', '?')})")
     return []
+
+
+def _json_safe_signal_row(row: dict) -> dict:
+    out: dict[str, Any] = {}
+    for key in [
+        "title",
+        "url",
+        "summary",
+        "signal_score",
+        "org_confidence",
+        "keyword_hits",
+        "published_at",
+        "fetched_at",
+    ]:
+        value = (row or {}).get(key)
+        if isinstance(value, datetime):
+            out[key] = value.isoformat()
+        else:
+            out[key] = value
+    return json_safe(out) if isinstance(out, dict) else {}
+
+
+def _chunked(items: list[Any], size: int) -> list[list[Any]]:
+    n = max(1, int(size or 1))
+    return [items[i : i + n] for i in range(0, len(items), n)]
 
 
 def _score_signal(

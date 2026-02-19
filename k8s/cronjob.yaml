@@ -47,8 +47,7 @@ spec:
                   pip install --no-cache-dir --user "https://github.com/fedoratechnologies/lead-radar/archive/refs/heads/main.tar.gz"
                   export LEAD_RADAR_DB_DSN="postgresql://${DB_USERNAME}:${DB_PASSWORD}@lead-radar-cnpg-rw.lead-radar.svc.cluster.local:5432/lead_radar?sslmode=require"
                   export LEAD_RADAR_CONFIG_DIR="/config"
-                  export LEAD_RADAR_ERPNEXT_BASE_URL="http://erpnext.erpnext.svc.cluster.local:8080"
-                  export LEAD_RADAR_ERPNEXT_SITE_HOST="cleopatra.fedora.solutions"
+                  export LEAD_RADAR_HUB_BASE_URL="http://hubdirectory-opportunity-api.hubdirectory.svc.cluster.local"
                   lead-radar-collector
               env:
                 - name: PYTHONUNBUFFERED
@@ -63,17 +62,11 @@ spec:
                     secretKeyRef:
                       name: lead-radar-cnpg-app
                       key: password
-                - name: LEAD_RADAR_ERPNEXT_API_KEY
+                - name: LEAD_RADAR_HUB_INGEST_SECRET
                   valueFrom:
                     secretKeyRef:
-                      name: lead-radar-erpnext-api
-                      key: api_key
-                      optional: true
-                - name: LEAD_RADAR_ERPNEXT_API_SECRET
-                  valueFrom:
-                    secretKeyRef:
-                      name: lead-radar-erpnext-api
-                      key: api_secret
+                      name: lead-radar-hubdirectory-ingest
+                      key: RADAR_INGEST_SECRET
                       optional: true
                 - name: LEAD_RADAR_S3_ENDPOINT
                   valueFrom:
