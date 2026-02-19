@@ -102,6 +102,14 @@ spec:
                   value: "lead-radar/0.1 (+https://github.com/fedoratechnologies/lead-radar)"
                 - name: TZ
                   value: "America/Chicago"
+                - name: LEAD_RADAR_HUB_MIN_SCORE
+                  value: "0"
+                - name: LEAD_RADAR_HUB_MAX_ORGS
+                  value: "5000"
+                - name: LEAD_RADAR_HUB_BATCH_SIZE
+                  value: "100"
+                - name: LEAD_RADAR_HUB_SIGNAL_LIMIT
+                  value: "8"
               volumeMounts:
                 - name: config
                   mountPath: /config

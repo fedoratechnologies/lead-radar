@@ -288,7 +288,17 @@ def get_recent_signals(
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT title, url, summary, published_at, fetched_at, signal_score, keyword_hits, org_confidence
+            SELECT
+              source_id,
+              content_hash,
+              title,
+              url,
+              summary,
+              published_at,
+              fetched_at,
+              signal_score,
+              keyword_hits,
+              org_confidence
             FROM signals
             WHERE org_name = %(org_name)s
             ORDER BY COALESCE(published_at, fetched_at) DESC

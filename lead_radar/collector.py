@@ -81,6 +81,7 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
     hub_min_score = float(_env("LEAD_RADAR_HUB_MIN_SCORE") or (config.scoring.promote_threshold or 0))
     hub_max_orgs = int(_env("LEAD_RADAR_HUB_MAX_ORGS") or "200")
     hub_batch_size = int(_env("LEAD_RADAR_HUB_BATCH_SIZE") or "100")
+    hub_signal_limit = int(_env("LEAD_RADAR_HUB_SIGNAL_LIMIT") or "8")
     hub_org_updates: list[dict] = []
 
     inserted_signals = 0
@@ -219,7 +220,7 @@ def collect(config: LeadRadarConfig, config_dir: Path) -> None:
         )
 
         if hubdirectory and last_signal_at and aggregate >= hub_min_score and len(hub_org_updates) < hub_max_orgs:
-            recent = get_recent_signals(conn, org_name=org_name, limit=5)
+            recent = get_recent_signals(conn, org_name=org_name, limit=hub_signal_limit)
             hub_org_updates.append(
                 {
                     "org_name": org_name,
@@ -441,6 +442,8 @@ def _fetch_entries_for_source(source: Any, user_agent: str) -> list[Any]:
 def _json_safe_signal_row(row: dict) -> dict:
     out: dict[str, Any] = {}
     for key in [
+        "source_id",
+        "content_hash",
         "title",
         "url",
         "summary",
